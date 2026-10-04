@@ -35,14 +35,6 @@
 
 [https://zoomnexmeet.onrender.com/](https://zoomnexmeet.onrender.com/)
 
-## 🚀 Installation
-
-```bash
-git clone https://github.com/priyachauh5/zoom-clone.git
-cd zoom-clone
-npm install
-```
-
 ## 💻 Usage
 
 ```bash
