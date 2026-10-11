@@ -58,6 +58,7 @@ export const connectToSocket = (server) => {
             }
 
             // Notify remaining participants in the room
+            console.log(`[Socket] Emitting user-left ${sock.id} to room "${roomId}". Remaining count: ${connections[roomId].length}`);
             io.to(roomId).emit("user-left", sock.id);
             const remaining = Object.values(roomParticipants[roomId] || {});
             io.to(roomId).emit("participants-update", remaining);
@@ -143,7 +144,20 @@ export const connectToSocket = (server) => {
         });
 
         socket.on("signal", (toId, message) => {
-            io.to(toId).emit("signal", socket.id, message);
+            let targetId = toId;
+            let payload = message;
+
+            if (typeof toId === 'object' && toId !== null && !message) {
+                targetId = toId.toId || toId.to || toId.recipientId;
+                payload = toId;
+            }
+
+            if (!targetId) {
+                console.warn(`[Socket] signal event from ${socket.id} without recipient target ID`);
+                return;
+            }
+
+            io.to(targetId).emit("signal", socket.id, payload);
         });
 
         socket.on("change-guest-access", (path, allowGuests) => {

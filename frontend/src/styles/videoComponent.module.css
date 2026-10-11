@@ -645,3 +645,29 @@
         font-size: 1.6rem;
     }
 }
+
+.audioBlockedBanner {
+    position: absolute;
+    top: 68px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(217, 48, 37, 0.95);
+    color: #ffffff;
+    padding: 10px 20px;
+    border-radius: 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    z-index: 25;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+    cursor: pointer;
+    font-size: 0.88rem;
+    font-weight: 500;
+    backdrop-filter: blur(8px);
+    transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.audioBlockedBanner:hover {
+    background: rgba(217, 48, 37, 1);
+    transform: translateX(-50%) scale(1.02);
+}
