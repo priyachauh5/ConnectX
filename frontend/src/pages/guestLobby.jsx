@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import axios from 'axios';
 import {
     Box,
@@ -27,14 +27,25 @@ import server from '../environment';
 
 export default function GuestLobby() {
     const navigate = useNavigate();
+    const location = useLocation();
 
     // Inputs
     const [meetingCode, setMeetingCode] = useState('');
     const [guestName, setGuestName] = useState('');
 
-    // Device toggles
-    const [isCameraOn, setIsCameraOn] = useState(true);
-    const [isMicOn, setIsMicOn] = useState(true);
+    useEffect(() => {
+        const queryParams = new URLSearchParams(location.search);
+        const codeParam = queryParams.get('code') || queryParams.get('meetingCode');
+        if (codeParam) {
+            setMeetingCode(codeParam.trim());
+        } else if (location.state?.meetingCode) {
+            setMeetingCode(location.state.meetingCode.trim());
+        }
+    }, [location]);
+
+    // Device toggles - Camera and mic OFF by default (access camera/mic only when explicitly requested)
+    const [isCameraOn, setIsCameraOn] = useState(false);
+    const [isMicOn, setIsMicOn] = useState(false);
 
     // Status / Errors
     const [isValidating, setIsValidating] = useState(false);
@@ -93,12 +104,8 @@ export default function GuestLobby() {
         }
     };
 
-    // Initialize camera on mount if camera toggle is true
+    // Camera is OFF by default. Clean up tracks on unmount.
     useEffect(() => {
-        if (isCameraOn) {
-            startCamera();
-        }
-
         return () => {
             stopCamera();
         };

@@ -91,14 +91,42 @@ const addToActivity = async (req, res) => {
             return res.status(httpStatus.NOT_FOUND).json({ message: "User Not Found" });
         }
 
-        const newMeeting = new Meeting({
+        let cleanCode = (meeting_code || "").trim();
+        if (!cleanCode) {
+            return res.status(httpStatus.BAD_REQUEST).json({ message: "Meeting code is required" });
+        }
+
+        if (cleanCode.includes("/")) {
+            const parts = cleanCode.split("/").filter(Boolean);
+            cleanCode = parts[parts.length - 1] || cleanCode;
+        }
+
+        const escapedCode = cleanCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const existingMeeting = await Meeting.findOne({
+            meetingCode: { $regex: new RegExp(`^${escapedCode}$`, "i") }
+        }).sort({ date: 1 });
+
+        const canonicalCode = existingMeeting ? existingMeeting.meetingCode : cleanCode;
+
+        // Check if user already has this meeting recorded in their activity
+        const existingUserMeeting = await Meeting.findOne({
             user_id: user.username,
-            meetingCode: meeting_code
+            meetingCode: canonicalCode
         });
 
-        await newMeeting.save();
+        if (!existingUserMeeting) {
+            const newMeeting = new Meeting({
+                user_id: user.username,
+                meetingCode: canonicalCode,
+                allowGuests: existingMeeting ? existingMeeting.allowGuests : true
+            });
+            await newMeeting.save();
+        }
 
-        return res.status(httpStatus.CREATED).json({ message: "Added code to activity" });
+        return res.status(httpStatus.CREATED).json({
+            message: "Added code to activity",
+            meetingCode: canonicalCode
+        });
     } catch (e) {
         return res.status(httpStatus.INTERNAL_SERVER_ERROR).json({ message: `Something went wrong ${e}` });
     }
@@ -110,17 +138,91 @@ const checkMeetingCode = async (req, res) => {
         return res.status(httpStatus.BAD_REQUEST).json({ message: "Please provide a meeting code" });
     }
     try {
-        const cleanCode = meetingCode.trim();
+        let cleanCode = meetingCode.trim();
+        if (cleanCode.includes("/")) {
+            const parts = cleanCode.split("/").filter(Boolean);
+            cleanCode = parts[parts.length - 1] || cleanCode;
+        }
+
+        const escapedCode = cleanCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const meeting = await Meeting.findOne({
-            meetingCode: { $regex: new RegExp(`^${cleanCode}$`, "i") }
-        });
+            meetingCode: { $regex: new RegExp(`^${escapedCode}$`, "i") }
+        }).sort({ date: 1 });
+
         if (!meeting) {
             return res.status(httpStatus.NOT_FOUND).json({ message: "Meeting not found. Please check your meeting code." });
         }
-        return res.status(httpStatus.OK).json({ exists: true, meetingCode: meeting.meetingCode });
+        return res.status(httpStatus.OK).json({
+            exists: true,
+            meetingCode: meeting.meetingCode,
+            allowGuests: meeting.allowGuests !== false,
+            hostUsername: meeting.user_id
+        });
     } catch (e) {
         return res.status(httpStatus.INTERNAL_SERVER_ERROR).json({ message: `Something went wrong: ${e.message}` });
     }
 }
 
-export { login, register, getUserHistory, addToActivity, checkMeetingCode }
+const updateMeetingGuestAccess = async (req, res) => {
+    const { token, meetingCode, allowGuests } = req.body;
+    if (!token || !meetingCode) {
+        return res.status(httpStatus.BAD_REQUEST).json({ message: "Token and meeting code are required" });
+    }
+
+    try {
+        const user = await User.findOne({ token });
+        if (!user) {
+            return res.status(httpStatus.UNAUTHORIZED).json({ message: "Invalid or expired token" });
+        }
+
+        let cleanCode = meetingCode.trim();
+        if (cleanCode.includes("/")) {
+            const parts = cleanCode.split("/").filter(Boolean);
+            cleanCode = parts[parts.length - 1] || cleanCode;
+        }
+
+        const escapedCode = cleanCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const meeting = await Meeting.findOne({
+            meetingCode: { $regex: new RegExp(`^${escapedCode}$`, "i") }
+        }).sort({ date: 1 });
+
+        if (!meeting) {
+            return res.status(httpStatus.NOT_FOUND).json({ message: "Meeting not found" });
+        }
+
+        if (meeting.user_id !== user.username) {
+            return res.status(httpStatus.FORBIDDEN).json({ message: "Only the meeting host can change guest access settings" });
+        }
+
+        meeting.allowGuests = Boolean(allowGuests);
+        await meeting.save();
+
+        return res.status(httpStatus.OK).json({
+            message: "Guest access setting updated successfully",
+            allowGuests: meeting.allowGuests
+        });
+    } catch (e) {
+        return res.status(httpStatus.INTERNAL_SERVER_ERROR).json({ message: `Something went wrong: ${e.message}` });
+    }
+}
+
+const getUserDetails = async (req, res) => {
+    const { token } = req.query;
+    if (!token) {
+        return res.status(httpStatus.BAD_REQUEST).json({ message: "Token is required" });
+    }
+    try {
+        const user = await User.findOne({ token });
+        if (!user) {
+            return res.status(httpStatus.NOT_FOUND).json({ message: "User not found" });
+        }
+        return res.status(httpStatus.OK).json({
+            name: user.name,
+            username: user.username
+        });
+    } catch (e) {
+        return res.status(httpStatus.INTERNAL_SERVER_ERROR).json({ message: `Something went wrong: ${e.message}` });
+    }
+}
+
+export { login, register, getUserHistory, addToActivity, checkMeetingCode, updateMeetingGuestAccess, getUserDetails }

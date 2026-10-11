@@ -29,6 +29,8 @@ import KeyboardIcon from '@mui/icons-material/Keyboard';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ShareIcon from '@mui/icons-material/Share';
 import CloseIcon from '@mui/icons-material/Close';
+import axios from 'axios';
+import server from '../environment';
 import { AuthContext } from '../contexts/AuthContext';
 
 function HomeComponent() {
@@ -147,11 +149,29 @@ function HomeComponent() {
         setIsJoining(true);
 
         try {
-            await addToUserHistory(code);
-            navigate(`/${code}`);
+            const baseUrl = server.replace(/\/+$/, '');
+            const valRes = await axios.get(`${baseUrl}/api/v1/users/validate_meeting/${encodeURIComponent(code)}`);
+
+            if (valRes.data && valRes.data.exists) {
+                const canonicalCode = valRes.data.meetingCode || code;
+                try {
+                    await addToUserHistory(canonicalCode);
+                } catch (historyErr) {
+                    console.warn("Could not save to history:", historyErr);
+                }
+                navigate(`/${canonicalCode}`);
+            } else {
+                setJoinError("Meeting not found. Please verify your meeting code.");
+            }
         } catch (err) {
             console.error("Error joining video call:", err);
-            navigate(`/${code}`);
+            if (err.response && err.response.status === 404) {
+                setJoinError("Meeting not found. Please check your meeting code.");
+            } else if (err.response && err.response.data && err.response.data.message) {
+                setJoinError(err.response.data.message);
+            } else {
+                setJoinError("Unable to validate meeting code. Please try again.");
+            }
         } finally {
             setIsJoining(false);
         }
