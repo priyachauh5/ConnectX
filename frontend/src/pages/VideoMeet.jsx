@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import {
@@ -32,6 +32,7 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import LockPersonIcon from '@mui/icons-material/LockPerson';
 import HourglassEmptyIcon from '@mui/icons-material/HourglassEmpty';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import RemoveIcon from '@mui/icons-material/Remove';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import styles from '../styles/videoComponent.module.css';
 import server from '../environment';
@@ -92,6 +93,7 @@ export default function VideoMeetComponent() {
     const [meetingLoading, setMeetingLoading] = useState(true);
     const [meetingNotFound, setMeetingNotFound] = useState(false);
     const [isHost, setIsHost] = useState(false);
+    const [hostUsername, setHostUsername] = useState('');
     const [allowGuests, setAllowGuests] = useState(true);
     const [isGuestBlocked, setIsGuestBlocked] = useState(false);
     const [hostUpdating, setHostUpdating] = useState(false);
@@ -108,7 +110,8 @@ export default function VideoMeetComponent() {
     const [username, setUsername] = useState(initialGuestName);
 
     // UI states
-    const [showChat, setShowChat] = useState(false);
+    const [sidebarOpen, setSidebarOpen] = useState(false);
+    const [sidebarTab, setSidebarTab] = useState('chat'); // 'people' | 'chat'
     const [messages, setMessages] = useState([]);
     const [message, setMessage] = useState('');
     const [newMessages, setNewMessages] = useState(0);
@@ -146,6 +149,8 @@ export default function VideoMeetComponent() {
     const videoRefCurrent = useRef(initialVideoOn);
     const audioRefCurrent = useRef(initialAudioOn);
     const screenRefCurrent = useRef(false);
+    const sidebarOpenRef = useRef(sidebarOpen);
+    const sidebarTabRef = useRef(sidebarTab);
 
     // Synchronize username and meetingCode refs
     useEffect(() => {
@@ -168,6 +173,14 @@ export default function VideoMeetComponent() {
         screenRefCurrent.current = screen;
     }, [screen]);
 
+    useEffect(() => {
+        sidebarOpenRef.current = sidebarOpen;
+    }, [sidebarOpen]);
+
+    useEffect(() => {
+        sidebarTabRef.current = sidebarTab;
+    }, [sidebarTab]);
+
     // Keep videoRef in sync with videos state
     useEffect(() => {
         videoRef.current = videos;
@@ -183,10 +196,10 @@ export default function VideoMeetComponent() {
 
     // Auto-scroll chat to latest message
     useEffect(() => {
-        if (showChat && chatEndRef.current) {
+        if (sidebarOpen && sidebarTab === 'chat' && chatEndRef.current) {
             chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [messages, showChat]);
+    }, [messages, sidebarOpen, sidebarTab]);
 
     // Color generator for avatar initials
     const getAvatarColor = useCallback((name) => {
@@ -201,13 +214,45 @@ export default function VideoMeetComponent() {
 
     // Initials generator
     const getInitials = useCallback((name) => {
-        if (!name) return '?';
-        const parts = name.trim().split(' ');
+        if (!name || !name.trim()) return '?';
+        const clean = name.replace(/\s*\(You\)$/i, '').trim();
+        if (!clean) return 'Y';
+        const parts = clean.split(/\s+/).filter(Boolean);
         if (parts.length >= 2) {
             return (parts[0][0] + parts[1][0]).toUpperCase();
         }
-        return name.slice(0, 2).toUpperCase();
+        return clean.slice(0, 2).toUpperCase();
     }, []);
+
+    // Display name helper with graceful fallback
+    const getDisplayName = useCallback((rawName, isLocal = false) => {
+        const clean = (rawName || '').replace(/\s*\(You\)$/i, '').trim();
+        if (isLocal) {
+            return clean ? `${clean} (You)` : 'You';
+        }
+        if (!clean || clean.toLowerCase() === 'participant') {
+            return 'Guest';
+        }
+        return clean;
+    }, []);
+
+    // Resolve remote participant name prioritizing authoritative server data
+    const resolveParticipantName = useCallback((socketId, peerUserName) => {
+        const remoteParticipant = participants.find((p) => p.socketId === socketId);
+        const serverName = remoteParticipant?.username ? String(remoteParticipant.username).trim() : '';
+        if (serverName && serverName.toLowerCase() !== 'participant') {
+            return serverName;
+        }
+        const refName = peerNamesRef.current[socketId] ? String(peerNamesRef.current[socketId]).trim() : '';
+        if (refName && refName.toLowerCase() !== 'participant') {
+            return refName;
+        }
+        const peerName = peerUserName ? String(peerUserName).trim() : '';
+        if (peerName && peerName.toLowerCase() !== 'participant') {
+            return peerName;
+        }
+        return serverName || refName || peerName || '';
+    }, [participants]);
 
     // Validate meeting and check host status
     const validateMeetingAndHost = useCallback(async () => {
@@ -247,6 +292,7 @@ export default function VideoMeetComponent() {
 
                 const meetingAllowGuests = res.data.allowGuests !== false;
                 const meetingHostUsername = res.data.hostUsername;
+                setHostUsername(meetingHostUsername || '');
 
                 setAllowGuests(meetingAllowGuests);
 
@@ -311,7 +357,9 @@ export default function VideoMeetComponent() {
             }
         ]);
         if (socketIdSender !== socketIdRef.current) {
-            setNewMessages((prev) => prev + 1);
+            if (!sidebarOpenRef.current || sidebarTabRef.current !== 'chat') {
+                setNewMessages((prev) => prev + 1);
+            }
         }
     }, []);
 
@@ -753,7 +801,7 @@ export default function VideoMeetComponent() {
         socketRef.current.on('signal', gotMessageFromServer);
 
         socketRef.current.on('connect', () => {
-            const currentDisplayName = usernameRef.current || username || 'Participant';
+            const currentDisplayName = (usernameRef.current || username || '').trim() || 'Guest';
             console.log(`[WebRTC] Socket connected. ID: ${socketRef.current.id}. Joining canonical call: ${targetRoom} as "${currentDisplayName}"`);
             socketIdRef.current = socketRef.current.id;
 
@@ -765,7 +813,38 @@ export default function VideoMeetComponent() {
             socketRef.current.on('room-joined', (data) => {
                 console.log(`[WebRTC] Confirmed room membership for room: ${data.roomId}`, data);
                 if (data.participants && Array.isArray(data.participants)) {
+                    data.participants.forEach((p) => {
+                        if (p.socketId && p.username) {
+                            peerNamesRef.current[p.socketId] = p.username;
+                        }
+                    });
                     setParticipants(data.participants);
+
+                    // Pre-populate videos for existing remote participants
+                    const remoteList = data.participants.filter((p) => p.socketId !== socketIdRef.current);
+                    setVideos((prevVideos) => {
+                        const nextVideos = [...prevVideos];
+                        remoteList.forEach((p) => {
+                            const existingIndex = nextVideos.findIndex((v) => v.socketId === p.socketId);
+                            const pName = getDisplayName(p.username || peerNamesRef.current[p.socketId], false);
+                            if (existingIndex === -1) {
+                                nextVideos.push({
+                                    socketId: p.socketId,
+                                    userName: pName,
+                                    stream: remoteStreamsRef.current[p.socketId] || null,
+                                    isVideoOn: peerMediaStatesRef.current[p.socketId]?.isVideoOn || false,
+                                    isAudioOn: peerMediaStatesRef.current[p.socketId]?.isAudioOn || false,
+                                    isScreenSharing: peerMediaStatesRef.current[p.socketId]?.isScreenSharing || false
+                                });
+                            } else if (p.username && nextVideos[existingIndex].userName !== pName) {
+                                nextVideos[existingIndex] = {
+                                    ...nextVideos[existingIndex],
+                                    userName: pName
+                                };
+                            }
+                        });
+                        return nextVideos;
+                    });
                 }
             });
 
@@ -791,20 +870,21 @@ export default function VideoMeetComponent() {
                     // 1. Add any remote participant not yet in nextVideos
                     remoteList.forEach((p) => {
                         const existingIndex = nextVideos.findIndex((v) => v.socketId === p.socketId);
+                        const pName = getDisplayName(p.username || peerNamesRef.current[p.socketId], false);
                         if (existingIndex === -1) {
                             nextVideos.push({
                                 socketId: p.socketId,
-                                userName: p.username || 'Participant',
+                                userName: pName,
                                 stream: remoteStreamsRef.current[p.socketId] || null,
                                 isVideoOn: peerMediaStatesRef.current[p.socketId]?.isVideoOn || false,
                                 isAudioOn: peerMediaStatesRef.current[p.socketId]?.isAudioOn || false,
                                 isScreenSharing: peerMediaStatesRef.current[p.socketId]?.isScreenSharing || false
                             });
                         } else {
-                            if (p.username && nextVideos[existingIndex].userName !== p.username) {
+                            if (p.username && nextVideos[existingIndex].userName !== pName) {
                                 nextVideos[existingIndex] = {
                                     ...nextVideos[existingIndex],
-                                    userName: p.username
+                                    userName: pName
                                 };
                             }
                         }
@@ -832,7 +912,7 @@ export default function VideoMeetComponent() {
             // Participant leaves
             socketRef.current.on('user-left', (id) => {
                 console.log(`[WebRTC] User left: ${id}`);
-                const leavingName = peerNamesRef.current[id] || 'A participant';
+                const leavingName = getDisplayName(peerNamesRef.current[id], false);
                 setToast({ open: true, message: `${leavingName} left the meeting`, severity: 'info' });
 
                 setVideos((prev) => prev.filter((v) => v.socketId !== id));
@@ -864,16 +944,21 @@ export default function VideoMeetComponent() {
             socketRef.current.on('user-joined', (id, clients, serverParticipants) => {
                 console.log(`[WebRTC] user-joined event: joiningId=${id}, allClients=`, clients);
 
+                // If server provided updated participants, sync state and peerNamesRef
+                if (serverParticipants && Array.isArray(serverParticipants)) {
+                    serverParticipants.forEach((p) => {
+                        if (p.socketId && p.username) {
+                            peerNamesRef.current[p.socketId] = p.username;
+                        }
+                    });
+                    setParticipants(serverParticipants);
+                }
+
                 // Show toast notification when someone else joins
                 if (id !== socketIdRef.current) {
                     const joiningUser = (serverParticipants || []).find((p) => p.socketId === id);
-                    const nameToShow = joiningUser?.username || peerNamesRef.current[id] || 'A participant';
+                    const nameToShow = getDisplayName(joiningUser?.username || peerNamesRef.current[id], false);
                     setToast({ open: true, message: `${nameToShow} joined the meeting`, severity: 'info' });
-                }
-
-                // If server provided updated participants, sync state
-                if (serverParticipants && Array.isArray(serverParticipants)) {
-                    setParticipants(serverParticipants);
                 }
 
                 clients.forEach((socketListId) => {
@@ -881,10 +966,10 @@ export default function VideoMeetComponent() {
 
                     // Ensure remote participant tile exists in videos state immediately
                     setVideos((prevVideos) => {
-                        const exists = prevVideos.some((v) => v.socketId === socketListId);
-                        if (!exists) {
-                            const foundParticipant = (serverParticipants || []).find((p) => p.socketId === socketListId);
-                            const pName = foundParticipant?.username || peerNamesRef.current[socketListId] || 'Participant';
+                        const existingIndex = prevVideos.findIndex((v) => v.socketId === socketListId);
+                        const foundParticipant = (serverParticipants || []).find((p) => p.socketId === socketListId);
+                        const pName = getDisplayName(foundParticipant?.username || peerNamesRef.current[socketListId], false);
+                        if (existingIndex === -1) {
                             return [
                                 ...prevVideos,
                                 {
@@ -896,6 +981,10 @@ export default function VideoMeetComponent() {
                                     isScreenSharing: peerMediaStatesRef.current[socketListId]?.isScreenSharing || false
                                 }
                             ];
+                        } else if (pName && prevVideos[existingIndex].userName !== pName) {
+                            const next = [...prevVideos];
+                            next[existingIndex] = { ...next[existingIndex], userName: pName };
+                            return next;
                         }
                         return prevVideos;
                     });
@@ -941,7 +1030,7 @@ export default function VideoMeetComponent() {
                                                 meetingId: meetingCodeRef.current || meetingCode,
                                                 fromId: socketIdRef.current,
                                                 toId: id2,
-                                                userName: usernameRef.current || username || 'Participant',
+                                                userName: (usernameRef.current || username || '').trim() || 'Guest',
                                                 type: 'media-toggle',
                                                 isVideoOn: videoRefCurrent.current || screenRefCurrent.current,
                                                 isAudioOn: audioRefCurrent.current,
@@ -959,7 +1048,7 @@ export default function VideoMeetComponent() {
                 }
             });
         });
-    }, [addMessage, gotMessageFromServer, getOrCreatePeerConnection, meetingCode, isHost, username]);
+    }, [addMessage, gotMessageFromServer, getOrCreatePeerConnection, meetingCode, isHost, username, getDisplayName]);
 
     // Initial media setup if requested from guest lobby
     useEffect(() => {
@@ -1424,8 +1513,65 @@ export default function VideoMeetComponent() {
         setAskForUsername(false);
     };
 
+    // Build authoritative participant list for People sidebar tab
+    const allParticipantsList = useMemo(() => {
+        const list = [];
+        const localId = socketIdRef.current || 'local';
+        const rawLocal = (username || '').trim();
+        const localName = rawLocal || 'You';
+
+        // 1. Add local participant (You)
+        list.push({
+            socketId: localId,
+            username: localName,
+            isLocal: true,
+            isHost: isHost,
+            isVideoOn: Boolean(video || screen),
+            isAudioOn: Boolean(audio)
+        });
+
+        // 2. Add remote participants
+        if (participants && participants.length > 0) {
+            participants.forEach((p) => {
+                if (p.socketId !== localId) {
+                    const peerVideo = videos.find((v) => v.socketId === p.socketId);
+                    const mediaState = peerMediaStatesRef.current[p.socketId];
+                    const rawName = resolveParticipantName(p.socketId, peerVideo?.userName);
+                    const pName = getDisplayName(rawName, false);
+                    const isParticipantHost = Boolean(hostUsername && (p.username === hostUsername || rawName === hostUsername));
+
+                    list.push({
+                        socketId: p.socketId,
+                        username: pName,
+                        isLocal: false,
+                        isHost: isParticipantHost,
+                        isVideoOn: peerVideo ? Boolean(peerVideo.isVideoOn) : Boolean(mediaState?.isVideoOn),
+                        isAudioOn: peerVideo ? Boolean(peerVideo.isAudioOn) : Boolean(mediaState?.isAudioOn)
+                    });
+                }
+            });
+        } else {
+            videos.forEach((v) => {
+                const rawName = resolveParticipantName(v.socketId, v.userName);
+                const pName = getDisplayName(rawName, false);
+                const isParticipantHost = Boolean(hostUsername && (v.userName === hostUsername || rawName === hostUsername));
+
+                list.push({
+                    socketId: v.socketId,
+                    username: pName,
+                    isLocal: false,
+                    isHost: isParticipantHost,
+                    isVideoOn: Boolean(v.isVideoOn),
+                    isAudioOn: Boolean(v.isAudioOn)
+                });
+            });
+        }
+
+        return list;
+    }, [participants, videos, isHost, hostUsername, video, screen, audio, username, getDisplayName, resolveParticipantName]);
+
     // Calculate authoritative total participant count
-    const totalParticipants = participants.length > 0 ? participants.length : (1 + videos.length);
+    const totalParticipants = allParticipantsList.length;
 
     let gridClass = styles.gridCount1;
     if (totalParticipants === 2) gridClass = styles.gridCount2;
@@ -1568,10 +1714,24 @@ export default function VideoMeetComponent() {
                         </Tooltip>
                     </div>
 
-                    <div className={styles.participantCountChip}>
-                        <PeopleAltIcon sx={{ fontSize: 18, color: '#8ab4f8' }} />
-                        <span>{totalParticipants}</span>
-                    </div>
+                    <Tooltip title={`Show everyone (${totalParticipants})`}>
+                        <button
+                            type="button"
+                            aria-label={`Show everyone (${totalParticipants})`}
+                            className={styles.participantCountChipButton}
+                            onClick={() => {
+                                if (sidebarOpen && sidebarTab === 'people') {
+                                    setSidebarOpen(false);
+                                } else {
+                                    setSidebarTab('people');
+                                    setSidebarOpen(true);
+                                }
+                            }}
+                        >
+                            <PeopleAltIcon sx={{ fontSize: 18, color: '#8ab4f8' }} />
+                            <span>{totalParticipants}</span>
+                        </button>
+                    </Tooltip>
                 </div>
 
                 <div className={styles.topBarRight}>
@@ -1623,120 +1783,381 @@ export default function VideoMeetComponent() {
                 </div>
             )}
 
-            {/* Main Video Area: Responsive Square/Rounded Grid of Participant Tiles */}
-            <div className={styles.mainStage}>
-                <div className={`${styles.videoGrid} ${gridClass}`}>
-                    {/* LOCAL PARTICIPANT TILE (You) */}
-                    <div className={`${styles.participantTile} ${styles.participantTileActive}`}>
-                        <video
-                            ref={localVideoref}
-                            autoPlay
-                            muted
-                            playsInline
-                            className={`${styles.tileVideo} ${styles.tileVideoMirrored}`}
-                            style={{ display: (video || screen) ? 'block' : 'none' }}
-                        />
+            {/* Middle Meeting Area: holds Main Stage and Sidebar side-by-side */}
+            <div className={styles.middleMeetingArea}>
+                {/* Main Video Area: Responsive Square/Rounded Grid of Participant Tiles */}
+                <div className={styles.mainStage}>
+                    <div className={`${styles.videoGrid} ${gridClass}`}>
+                        {/* LOCAL PARTICIPANT TILE (You) */}
+                        <div className={`${styles.participantTile} ${styles.participantTileActive}`}>
+                            <video
+                                ref={localVideoref}
+                                autoPlay
+                                muted
+                                playsInline
+                                className={`${styles.tileVideo} ${styles.tileVideoMirrored}`}
+                                style={{ display: (video || screen) ? 'block' : 'none' }}
+                            />
 
-                        {!(video || screen) && (
-                            <div className={styles.avatarTileContainer}>
-                                <div className={styles.avatarCircle} style={{ backgroundColor: getAvatarColor(username || 'You') }}>
-                                    {getInitials(username || 'You')}
+                            {!(video || screen) && (
+                                <div className={styles.avatarTileContainer}>
+                                    <div
+                                        className={styles.avatarCircle}
+                                        style={{ backgroundColor: getAvatarColor(username || 'You') }}
+                                    >
+                                        {getInitials(username || 'You')}
+                                    </div>
+                                    <div
+                                        className={styles.avatarNameLabel}
+                                        title={getDisplayName(username, true)}
+                                    >
+                                        {getDisplayName(username, true)}
+                                    </div>
+                                    <div className={styles.avatarCameraOffSubtext}>
+                                        <VideocamOffIcon sx={{ fontSize: 14 }} /> Camera is off
+                                    </div>
                                 </div>
-                                <div className={styles.avatarNameLabel}>{username || 'You'}</div>
-                                <div className={styles.avatarCameraOffSubtext}>
-                                    <VideocamOffIcon sx={{ fontSize: 14 }} /> Camera is off
+                            )}
+
+                            {/* Local Participant Name Overlay */}
+                            <div className={styles.tileNameTag}>
+                                <span
+                                    className={styles.tileNameText}
+                                    title={getDisplayName(username, true)}
+                                >
+                                    {getDisplayName(username, true)}
+                                </span>
+                            </div>
+
+                            {/* Local Audio Indicator */}
+                            <div
+                                className={`${styles.tileAudioIndicator} ${audio ? styles.tileAudioActive : styles.tileAudioMuted}`}
+                                title={audio ? 'Microphone on' : 'Microphone muted'}
+                            >
+                                {audio ? <MicIcon sx={{ fontSize: 16 }} /> : <MicOffIcon sx={{ fontSize: 16 }} />}
+                            </div>
+                        </div>
+
+                        {/* REMOTE PARTICIPANTS TILES */}
+                        {videos.map((peer) => {
+                            const peerStream = peer.stream || remoteStreamsRef.current[peer.socketId];
+                            const hasLiveVideoTrack = Boolean(
+                                peerStream &&
+                                peerStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
+                            );
+                            const showVideo = Boolean(peer.isVideoOn && hasLiveVideoTrack);
+
+                            const rawRemoteName = resolveParticipantName(peer.socketId, peer.userName);
+                            const remoteDisplayName = getDisplayName(rawRemoteName, false);
+
+                            return (
+                                <div key={peer.socketId} className={styles.participantTile}>
+                                    {/* DEDICATED AUDIO ELEMENT FOR REMOTE PARTICIPANT */}
+                                    <audio
+                                        data-socket={peer.socketId}
+                                        ref={(ref) => {
+                                            if (ref) {
+                                                remoteAudioRefs.current[peer.socketId] = ref;
+                                                const stream = peer.stream || remoteStreamsRef.current[peer.socketId];
+                                                if (stream && ref.srcObject !== stream) {
+                                                    ref.srcObject = stream;
+                                                }
+                                                ref.play().catch((err) => {
+                                                    if (err.name === 'NotAllowedError') {
+                                                        setAudioAutoplayBlocked(true);
+                                                    }
+                                                });
+                                            }
+                                        }}
+                                        autoPlay
+                                        playsInline
+                                    />
+
+                                    {/* VIDEO ELEMENT FOR REMOTE PARTICIPANT */}
+                                    <video
+                                        data-socket={peer.socketId}
+                                        ref={(ref) => {
+                                            if (ref) {
+                                                remoteVideoRefs.current[peer.socketId] = ref;
+                                                const stream = peer.stream || remoteStreamsRef.current[peer.socketId];
+                                                if (stream && ref.srcObject !== stream) {
+                                                    ref.srcObject = stream;
+                                                }
+                                                ref.play().catch(() => {});
+                                            }
+                                        }}
+                                        autoPlay
+                                        playsInline
+                                        muted
+                                        className={styles.tileVideo}
+                                        style={{ display: showVideo ? 'block' : 'none' }}
+                                    />
+
+                                    {!showVideo && (
+                                        <div className={styles.avatarTileContainer}>
+                                            <div
+                                                className={styles.avatarCircle}
+                                                style={{ backgroundColor: getAvatarColor(remoteDisplayName) }}
+                                            >
+                                                {getInitials(remoteDisplayName)}
+                                            </div>
+                                            <div
+                                                className={styles.avatarNameLabel}
+                                                title={remoteDisplayName}
+                                            >
+                                                {remoteDisplayName}
+                                            </div>
+                                            <div className={styles.avatarCameraOffSubtext}>
+                                                <VideocamOffIcon sx={{ fontSize: 14 }} /> Camera is off
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Remote Participant Name Tag */}
+                                    <div className={styles.tileNameTag}>
+                                        <span
+                                            className={styles.tileNameText}
+                                            title={remoteDisplayName}
+                                        >
+                                            {remoteDisplayName}
+                                        </span>
+                                    </div>
+
+                                    {/* Remote Audio Indicator */}
+                                    <div
+                                        className={`${styles.tileAudioIndicator} ${peer.isAudioOn ? styles.tileAudioActive : styles.tileAudioMuted}`}
+                                        title={peer.isAudioOn ? 'Microphone on' : 'Microphone muted'}
+                                    >
+                                        {peer.isAudioOn ? <MicIcon sx={{ fontSize: 16 }} /> : <MicOffIcon sx={{ fontSize: 16 }} />}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+
+                {/* Floating Reopen Button when sidebar is minimized */}
+                {!sidebarOpen && (
+                    <Tooltip
+                        title={sidebarTab === 'chat' ? 'Open chat' : `Open people (${totalParticipants})`}
+                        placement="left"
+                    >
+                        <button
+                            type="button"
+                            className={styles.expandSidebarButton}
+                            onClick={() => setSidebarOpen(true)}
+                            aria-label={sidebarTab === 'chat' ? 'Open chat sidebar' : 'Open people sidebar'}
+                        >
+                            {sidebarTab === 'chat' ? (
+                                <Badge badgeContent={newMessages} color="primary" max={99}>
+                                    <ChatIcon sx={{ fontSize: 18 }} />
+                                </Badge>
+                            ) : (
+                                <PeopleAltIcon sx={{ fontSize: 18 }} />
+                            )}
+                            <span className={styles.expandSidebarLabel}>
+                                {sidebarTab === 'chat' ? 'Chat' : `People (${totalParticipants})`}
+                            </span>
+                        </button>
+                    </Tooltip>
+                )}
+
+                {/* Modern Google-Meet-Style In-Call Sidebar (People & Chat) */}
+                <aside
+                    className={`${styles.meetingSidebar} ${sidebarOpen ? styles.meetingSidebarExpanded : styles.meetingSidebarMinimized}`}
+                    aria-label="Meeting sidebar"
+                    aria-hidden={!sidebarOpen}
+                >
+                    <div className={styles.sidebarHeader}>
+                        <div className={styles.sidebarTabs}>
+                            <button
+                                type="button"
+                                className={`${styles.sidebarTabButton} ${sidebarTab === 'people' ? styles.sidebarTabActive : ''}`}
+                                onClick={() => setSidebarTab('people')}
+                                aria-label={`People (${totalParticipants})`}
+                            >
+                                <PeopleAltIcon sx={{ fontSize: 18 }} />
+                                <span>People ({totalParticipants})</span>
+                            </button>
+                            <button
+                                type="button"
+                                className={`${styles.sidebarTabButton} ${sidebarTab === 'chat' ? styles.sidebarTabActive : ''}`}
+                                onClick={() => {
+                                    setSidebarTab('chat');
+                                    setNewMessages(0);
+                                }}
+                                aria-label="Chat"
+                            >
+                                <ChatIcon sx={{ fontSize: 18 }} />
+                                <span>Chat</span>
+                                {newMessages > 0 && (
+                                    <span className={styles.unreadTabBadge}>{newMessages}</span>
+                                )}
+                            </button>
+                        </div>
+                        <div className={styles.sidebarHeaderActions}>
+                            <Tooltip title="Minimize sidebar">
+                                <IconButton
+                                    size="small"
+                                    aria-label="Minimize sidebar"
+                                    onClick={() => setSidebarOpen(false)}
+                                    className={styles.sidebarHeaderIconButton}
+                                    sx={{ color: '#5f6368', '&:hover': { bgcolor: '#f1f3f4', color: '#202124' } }}
+                                >
+                                    <RemoveIcon fontSize="small" />
+                                </IconButton>
+                            </Tooltip>
+                            <Tooltip title="Close sidebar">
+                                <IconButton
+                                    size="small"
+                                    aria-label="Close sidebar"
+                                    onClick={() => setSidebarOpen(false)}
+                                    className={styles.sidebarHeaderIconButton}
+                                    sx={{ color: '#5f6368', '&:hover': { bgcolor: '#f1f3f4', color: '#202124' } }}
+                                >
+                                    <CloseIcon fontSize="small" />
+                                </IconButton>
+                            </Tooltip>
+                        </div>
+                    </div>
+
+                        {/* People Tab Content */}
+                        {sidebarTab === 'people' && (
+                            <div className={styles.peopleContentArea}>
+                                <div className={styles.peopleHeaderSection}>
+                                    <span className={styles.peopleSectionTitle}>In call</span>
+                                    <span className={styles.peopleSectionCount}>{totalParticipants}</span>
+                                </div>
+
+                                <div className={styles.participantScrollList}>
+                                    {allParticipantsList.map((participant) => {
+                                        const isSelf = participant.isLocal;
+                                        const displayName = participant.username;
+                                        const initials = getInitials(displayName);
+                                        const avatarColor = getAvatarColor(displayName);
+
+                                        return (
+                                            <div key={participant.socketId} className={styles.participantListItem}>
+                                                <div className={styles.participantAvatar} style={{ backgroundColor: avatarColor }}>
+                                                    {initials}
+                                                </div>
+                                                <div className={styles.participantInfo}>
+                                                    <div className={styles.participantNameRow}>
+                                                        <span className={styles.participantName} title={displayName}>
+                                                            {displayName} {isSelf ? '(You)' : ''}
+                                                        </span>
+                                                        {participant.isHost && (
+                                                            <span className={styles.participantHostBadge}>Host</span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                                <div className={styles.participantControls}>
+                                                    <div
+                                                        className={`${styles.statusIcon} ${participant.isAudioOn ? styles.statusIconActive : styles.statusIconMuted}`}
+                                                        title={participant.isAudioOn ? 'Microphone on' : 'Microphone muted'}
+                                                    >
+                                                        {participant.isAudioOn ? (
+                                                            <MicIcon sx={{ fontSize: 18 }} />
+                                                        ) : (
+                                                            <MicOffIcon sx={{ fontSize: 18 }} />
+                                                        )}
+                                                    </div>
+                                                    <div
+                                                        className={`${styles.statusIcon} ${participant.isVideoOn ? styles.statusIconActive : styles.statusIconMuted}`}
+                                                        title={participant.isVideoOn ? 'Camera on' : 'Camera off'}
+                                                    >
+                                                        {participant.isVideoOn ? (
+                                                            <VideocamIcon sx={{ fontSize: 18 }} />
+                                                        ) : (
+                                                            <VideocamOffIcon sx={{ fontSize: 18 }} />
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}
 
-                        {/* Local Participant Name Overlay */}
-                        <div className={styles.tileNameTag}>
-                            <span>{username || 'You'} (You)</span>
-                        </div>
-
-                        {/* Local Audio Indicator */}
-                        <div className={`${styles.tileAudioIndicator} ${audio ? styles.tileAudioActive : styles.tileAudioMuted}`}>
-                            {audio ? <MicIcon sx={{ fontSize: 16 }} /> : <MicOffIcon sx={{ fontSize: 16 }} />}
-                        </div>
-                    </div>
-
-                    {/* REMOTE PARTICIPANTS TILES */}
-                    {videos.map((peer) => {
-                        const peerStream = peer.stream || remoteStreamsRef.current[peer.socketId];
-                        const hasLiveVideoTrack = Boolean(
-                            peerStream &&
-                            peerStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
-                        );
-                        const showVideo = Boolean(peer.isVideoOn && hasLiveVideoTrack);
-
-                        return (
-                            <div key={peer.socketId} className={styles.participantTile}>
-                                {/* DEDICATED AUDIO ELEMENT FOR REMOTE PARTICIPANT (plays continuously regardless of camera state) */}
-                                <audio
-                                    data-socket={peer.socketId}
-                                    ref={(ref) => {
-                                        if (ref) {
-                                            remoteAudioRefs.current[peer.socketId] = ref;
-                                            const stream = peer.stream || remoteStreamsRef.current[peer.socketId];
-                                            if (stream && ref.srcObject !== stream) {
-                                                ref.srcObject = stream;
-                                            }
-                                            ref.play().catch((err) => {
-                                                if (err.name === 'NotAllowedError') {
-                                                    setAudioAutoplayBlocked(true);
-                                                }
-                                            });
-                                        }
-                                    }}
-                                    autoPlay
-                                    playsInline
-                                />
-
-                                {/* VIDEO ELEMENT FOR REMOTE PARTICIPANT */}
-                                <video
-                                    data-socket={peer.socketId}
-                                    ref={(ref) => {
-                                        if (ref) {
-                                            remoteVideoRefs.current[peer.socketId] = ref;
-                                            const stream = peer.stream || remoteStreamsRef.current[peer.socketId];
-                                            if (stream && ref.srcObject !== stream) {
-                                                ref.srcObject = stream;
-                                            }
-                                            ref.play().catch(() => {});
-                                        }
-                                    }}
-                                    autoPlay
-                                    playsInline
-                                    muted
-                                    className={styles.tileVideo}
-                                    style={{ display: showVideo ? 'block' : 'none' }}
-                                />
-
-                                {!showVideo && (
-                                    <div className={styles.avatarTileContainer}>
-                                        <div className={styles.avatarCircle} style={{ backgroundColor: getAvatarColor(peer.userName || 'Participant') }}>
-                                            {getInitials(peer.userName || 'Participant')}
-                                        </div>
-                                        <div className={styles.avatarNameLabel}>{peer.userName || 'Participant'}</div>
-                                        <div className={styles.avatarCameraOffSubtext}>
-                                            <VideocamOffIcon sx={{ fontSize: 14 }} /> Camera is off
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Remote Participant Name Tag */}
-                                <div className={styles.tileNameTag}>
-                                    <span>{peer.userName || 'Participant'}</span>
+                        {/* Chat Tab Content */}
+                        {sidebarTab === 'chat' && (
+                            <div className={styles.chatContentArea}>
+                                <div className={styles.chatNoticeBox}>
+                                    Messages can only be seen by people in the call and are deleted when the call ends.
                                 </div>
 
-                                {/* Remote Audio Indicator */}
-                                <div className={`${styles.tileAudioIndicator} ${peer.isAudioOn ? styles.tileAudioActive : styles.tileAudioMuted}`}>
-                                    {peer.isAudioOn ? <MicIcon sx={{ fontSize: 16 }} /> : <MicOffIcon sx={{ fontSize: 16 }} />}
+                                <div className={styles.chatMessageList}>
+                                    {messages.length === 0 ? (
+                                        <div className={styles.chatEmptyState}>
+                                            <ChatIcon sx={{ fontSize: 44, color: '#bdc1c6', mb: 1 }} />
+                                            <Typography variant="body2" sx={{ fontWeight: 500, color: '#3c4043', mb: 0.5 }}>
+                                                No messages yet
+                                            </Typography>
+                                            <Typography variant="caption" sx={{ color: '#70757a' }}>
+                                                Send a message to everyone in the call.
+                                            </Typography>
+                                        </div>
+                                    ) : (
+                                        messages.map((item, index) => {
+                                            const isSelf = item.sender === (usernameRef.current || username || 'You');
+                                            return (
+                                                <div
+                                                    key={index}
+                                                    className={`${styles.chatMessageItem} ${isSelf ? styles.chatMessageItemSelf : styles.chatMessageItemOther}`}
+                                                >
+                                                    <span className={styles.chatSenderName}>
+                                                        {isSelf ? 'You' : (item.sender || 'Guest')} {item.time ? `• ${item.time}` : ''}
+                                                    </span>
+                                                    <div className={`${styles.chatMessageBubble} ${isSelf ? styles.chatBubbleSelf : styles.chatBubbleOther}`}>
+                                                        {item.data}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                    <div ref={chatEndRef} />
+                                </div>
+
+                                <div className={styles.chatInputContainer}>
+                                    <TextField
+                                        fullWidth
+                                        size="small"
+                                        placeholder="Send a message to everyone"
+                                        value={message}
+                                        onChange={(e) => setMessage(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter') sendMessage();
+                                        }}
+                                        variant="outlined"
+                                        sx={{
+                                            '& .MuiOutlinedInput-root': {
+                                                borderRadius: 3,
+                                                fontSize: '0.9rem'
+                                            }
+                                        }}
+                                    />
+                                    <Tooltip title="Send message">
+                                        <span>
+                                            <IconButton
+                                                color="primary"
+                                                onClick={sendMessage}
+                                                disabled={!message.trim()}
+                                                aria-label="Send message"
+                                                sx={{
+                                                    bgcolor: message.trim() ? '#1a73e8' : 'transparent',
+                                                    color: message.trim() ? '#ffffff' : '#9aa0a6',
+                                                    '&:hover': { bgcolor: message.trim() ? '#1557b0' : 'transparent' }
+                                                }}
+                                            >
+                                                <SendIcon fontSize="small" />
+                                            </IconButton>
+                                        </span>
+                                    </Tooltip>
                                 </div>
                             </div>
-                        );
-                    })}
-                </div>
+                        )}
+                    </aside>
             </div>
 
             {/* Bottom Meeting Controls Bar */}
@@ -1796,17 +2217,42 @@ export default function VideoMeetComponent() {
                     </Tooltip>
                 </div>
 
-                {/* Right: Chat Button & Action Controls */}
+                {/* Right: People & Chat Action Controls */}
                 <div className={styles.bottomControlRight}>
+                    {/* People Button */}
+                    <Tooltip title={`People (${totalParticipants})`}>
+                        <button
+                            type="button"
+                            aria-label={`People (${totalParticipants})`}
+                            className={`${styles.rightActionButton} ${sidebarOpen && sidebarTab === 'people' ? styles.rightActionButtonActive : ''}`}
+                            onClick={() => {
+                                if (sidebarOpen && sidebarTab === 'people') {
+                                    setSidebarOpen(false);
+                                } else {
+                                    setSidebarTab('people');
+                                    setSidebarOpen(true);
+                                }
+                            }}
+                        >
+                            <PeopleAltIcon />
+                        </button>
+                    </Tooltip>
+
                     {/* Chat Button with unread counter */}
-                    <Tooltip title="In-call messages">
+                    <Tooltip title="Chat with everyone">
                         <Badge badgeContent={newMessages} color="primary" max={99}>
                             <button
                                 type="button"
-                                className={`${styles.rightActionButton} ${showChat ? styles.rightActionButtonActive : ''}`}
+                                aria-label="Chat with everyone"
+                                className={`${styles.rightActionButton} ${sidebarOpen && sidebarTab === 'chat' ? styles.rightActionButtonActive : ''}`}
                                 onClick={() => {
-                                    setShowChat(!showChat);
-                                    setNewMessages(0);
+                                    if (sidebarOpen && sidebarTab === 'chat') {
+                                        setSidebarOpen(false);
+                                    } else {
+                                        setSidebarTab('chat');
+                                        setSidebarOpen(true);
+                                        setNewMessages(0);
+                                    }
                                 }}
                             >
                                 <ChatIcon />
@@ -1815,90 +2261,6 @@ export default function VideoMeetComponent() {
                     </Tooltip>
                 </div>
             </div>
-
-            {/* Google-Meet-Style In-Call Chat Panel */}
-            {showChat && (
-                <div className={styles.chatPanel}>
-                    <div className={styles.chatHeader}>
-                        <h3 className={styles.chatTitle}>In-call messages</h3>
-                        <IconButton
-                            size="small"
-                            onClick={() => setShowChat(false)}
-                            sx={{ color: '#5f6368' }}
-                        >
-                            <CloseIcon />
-                        </IconButton>
-                    </div>
-
-                    <div className={styles.chatNoticeBox}>
-                        Messages can only be seen by people in the call and are deleted when the call ends.
-                    </div>
-
-                    <div className={styles.chatMessageList}>
-                        {messages.length === 0 ? (
-                            <div className={styles.chatEmptyState}>
-                                <ChatIcon sx={{ fontSize: 44, color: '#bdc1c6', mb: 1 }} />
-                                <Typography variant="body2" sx={{ fontWeight: 500, color: '#3c4043', mb: 0.5 }}>
-                                    No messages yet
-                                </Typography>
-                                <Typography variant="caption" sx={{ color: '#70757a' }}>
-                                    Send a message to everyone in the call.
-                                </Typography>
-                            </div>
-                        ) : (
-                            messages.map((item, index) => {
-                                const isSelf = item.sender === (usernameRef.current || username || 'You');
-                                return (
-                                    <div
-                                        key={index}
-                                        className={`${styles.chatMessageItem} ${isSelf ? styles.chatMessageItemSelf : styles.chatMessageItemOther}`}
-                                    >
-                                        <span className={styles.chatSenderName}>
-                                            {isSelf ? 'You' : item.sender} {item.time ? `• ${item.time}` : ''}
-                                        </span>
-                                        <div className={`${styles.chatMessageBubble} ${isSelf ? styles.chatBubbleSelf : styles.chatBubbleOther}`}>
-                                            {item.data}
-                                        </div>
-                                    </div>
-                                );
-                            })
-                        )}
-                        <div ref={chatEndRef} />
-                    </div>
-
-                    <div className={styles.chatInputContainer}>
-                        <TextField
-                            fullWidth
-                            size="small"
-                            placeholder="Send a message to everyone"
-                            value={message}
-                            onChange={(e) => setMessage(e.target.value)}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter') sendMessage();
-                            }}
-                            variant="outlined"
-                            sx={{
-                                '& .MuiOutlinedInput-root': {
-                                    borderRadius: 3,
-                                    fontSize: '0.9rem'
-                                }
-                            }}
-                        />
-                        <IconButton
-                            color="primary"
-                            onClick={sendMessage}
-                            disabled={!message.trim()}
-                            sx={{
-                                bgcolor: message.trim() ? '#1a73e8' : 'transparent',
-                                color: message.trim() ? '#ffffff' : '#9aa0a6',
-                                '&:hover': { bgcolor: message.trim() ? '#1557b0' : 'transparent' }
-                            }}
-                        >
-                            <SendIcon fontSize="small" />
-                        </IconButton>
-                    </div>
-                </div>
-            )}
 
             {/* Notification Toast */}
             <Snackbar
