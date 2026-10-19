@@ -367,12 +367,7 @@ export default function VideoMeetComponent() {
     const getTrackSender = useCallback((pc, kind) => {
         if (!pc) return null;
         try {
-            if (pc.getSenders) {
-                const senders = pc.getSenders();
-                const senderWithTrack = senders.find((s) => s.track && s.track.kind === kind);
-                if (senderWithTrack) return senderWithTrack;
-            }
-
+            // Check transceivers first: retains kind info on receiver even when sender.track is null
             if (pc.getTransceivers) {
                 const transceivers = pc.getTransceivers();
                 const matched = transceivers.find((t) =>
@@ -380,6 +375,12 @@ export default function VideoMeetComponent() {
                     (t.sender && t.sender.track && t.sender.track.kind === kind)
                 );
                 if (matched && matched.sender) return matched.sender;
+            }
+
+            if (pc.getSenders) {
+                const senders = pc.getSenders();
+                const senderWithTrack = senders.find((s) => s.track && s.track.kind === kind);
+                if (senderWithTrack) return senderWithTrack;
             }
 
             return null;
@@ -551,9 +552,35 @@ export default function VideoMeetComponent() {
             }
             const peerStream = remoteStreamsRef.current[peerId];
 
+            // Remove any stale, ended, or duplicate tracks of the same kind so HTML <video> renders the active track
+            if (event.track.kind === 'video') {
+                peerStream.getVideoTracks().forEach((existingTrack) => {
+                    if (existingTrack.id !== event.track.id && (existingTrack.readyState === 'ended' || !existingTrack.enabled)) {
+                        try {
+                            peerStream.removeTrack(existingTrack);
+                        } catch (e) {}
+                    }
+                });
+            } else if (event.track.kind === 'audio') {
+                peerStream.getAudioTracks().forEach((existingTrack) => {
+                    if (existingTrack.id !== event.track.id && existingTrack.readyState === 'ended') {
+                        try {
+                            peerStream.removeTrack(existingTrack);
+                        } catch (e) {}
+                    }
+                });
+            }
+
             if (!peerStream.getTracks().some((t) => t.id === event.track.id)) {
                 peerStream.addTrack(event.track);
             }
+
+            event.track.onended = () => {
+                console.log(`[WebRTC] Remote track ended for ${peerId} (${event.track.kind})`);
+                try {
+                    peerStream.removeTrack(event.track);
+                } catch (e) {}
+            };
 
             // Bind to remote video element if mounted
             if (remoteVideoRefs.current[peerId]) {
@@ -629,7 +656,10 @@ export default function VideoMeetComponent() {
         console.log('[WebRTC] Stopping screen share');
         if (screenStreamRef.current) {
             screenStreamRef.current.getTracks().forEach((track) => {
-                try { track.stop(); } catch (e) {}
+                try {
+                    track.onended = null;
+                    track.stop();
+                } catch (e) {}
             });
             screenStreamRef.current = null;
         }
@@ -654,6 +684,8 @@ export default function VideoMeetComponent() {
             broadcastMediaState(true, audioRefCurrent.current, false);
         } else {
             console.log('[WebRTC] Camera is off, resetting video sender to null');
+            setVideo(false);
+            videoRefCurrent.current = false;
             for (let id in connectionsRef.current) {
                 const pc = connectionsRef.current[id];
                 const videoSender = getTrackSender(pc, 'video');
@@ -685,13 +717,13 @@ export default function VideoMeetComponent() {
                 );
             }
 
-            // Update peer media toggle states
-            if (signal.type === 'media-toggle') {
-                console.log(`[WebRTC] media-toggle from ${fromId}: video=${signal.isVideoOn}, audio=${signal.isAudioOn}`);
+            // Update peer media toggle states from any signal carrying media flags
+            if (signal.isVideoOn !== undefined || signal.isAudioOn !== undefined || signal.isScreenSharing !== undefined) {
+                console.log(`[WebRTC] media status from ${fromId}: video=${signal.isVideoOn}, audio=${signal.isAudioOn}, screen=${signal.isScreenSharing}`);
                 peerMediaStatesRef.current[fromId] = {
-                    isVideoOn: Boolean(signal.isVideoOn),
-                    isAudioOn: Boolean(signal.isAudioOn),
-                    isScreenSharing: Boolean(signal.isScreenSharing)
+                    isVideoOn: signal.isVideoOn !== undefined ? Boolean(signal.isVideoOn) : (peerMediaStatesRef.current[fromId]?.isVideoOn || false),
+                    isAudioOn: signal.isAudioOn !== undefined ? Boolean(signal.isAudioOn) : (peerMediaStatesRef.current[fromId]?.isAudioOn || false),
+                    isScreenSharing: signal.isScreenSharing !== undefined ? Boolean(signal.isScreenSharing) : (peerMediaStatesRef.current[fromId]?.isScreenSharing || false)
                 };
 
                 setVideos((prevVideos) =>
@@ -1365,12 +1397,18 @@ export default function VideoMeetComponent() {
                 }
                 const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
                 const screenTrack = screenStream.getVideoTracks()[0];
+                if (!screenTrack) {
+                    console.warn('[WebRTC] No video track returned from getDisplayMedia');
+                    return;
+                }
 
                 screenStreamRef.current = screenStream;
                 setScreen(true);
                 screenRefCurrent.current = true;
 
+                // Handle native browser "Stop sharing" chrome banner or user ending share
                 screenTrack.onended = () => {
+                    console.log('[WebRTC] Native screen sharing track ended');
                     stopScreenShare();
                 };
 
@@ -1378,7 +1416,22 @@ export default function VideoMeetComponent() {
                     const pc = connectionsRef.current[id];
                     const videoSender = getTrackSender(pc, 'video');
                     if (videoSender) {
-                        videoSender.replaceTrack(screenTrack).catch((err) => console.error('[WebRTC] Error setting screen track:', err));
+                        try {
+                            if (pc.getTransceivers) {
+                                const trans = pc.getTransceivers().find((t) => t.sender === videoSender);
+                                if (trans && trans.direction !== 'sendrecv') {
+                                    trans.direction = 'sendrecv';
+                                }
+                            }
+                        } catch (e) {}
+
+                        videoSender.replaceTrack(screenTrack).catch((err) => {
+                            console.error(`[WebRTC] Error setting screen track for ${id}:`, err);
+                            try {
+                                pc.addTrack(screenTrack, screenStream);
+                                renegotiate(id);
+                            } catch (e) {}
+                        });
                     } else {
                         try {
                             pc.addTrack(screenTrack, screenStream);
@@ -1394,6 +1447,15 @@ export default function VideoMeetComponent() {
                 broadcastMediaState(true, audioRefCurrent.current, true);
             } catch (err) {
                 console.error('[WebRTC] Screen sharing error:', err);
+                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    console.log('[WebRTC] User canceled screen share selection dialog');
+                } else {
+                    setToast({
+                        open: true,
+                        message: 'Could not start screen sharing: ' + (err.message || 'Unknown error'),
+                        severity: 'error'
+                    });
+                }
                 setScreen(false);
                 screenRefCurrent.current = false;
             }
@@ -1526,8 +1588,9 @@ export default function VideoMeetComponent() {
             username: localName,
             isLocal: true,
             isHost: isHost,
-            isVideoOn: Boolean(video || screen),
-            isAudioOn: Boolean(audio)
+            isVideoOn: Boolean(video),
+            isAudioOn: Boolean(audio),
+            isScreenSharing: Boolean(screen)
         });
 
         // 2. Add remote participants
@@ -1546,7 +1609,8 @@ export default function VideoMeetComponent() {
                         isLocal: false,
                         isHost: isParticipantHost,
                         isVideoOn: peerVideo ? Boolean(peerVideo.isVideoOn) : Boolean(mediaState?.isVideoOn),
-                        isAudioOn: peerVideo ? Boolean(peerVideo.isAudioOn) : Boolean(mediaState?.isAudioOn)
+                        isAudioOn: peerVideo ? Boolean(peerVideo.isAudioOn) : Boolean(mediaState?.isAudioOn),
+                        isScreenSharing: peerVideo ? Boolean(peerVideo.isScreenSharing) : Boolean(mediaState?.isScreenSharing)
                     });
                 }
             });
@@ -1562,7 +1626,8 @@ export default function VideoMeetComponent() {
                     isLocal: false,
                     isHost: isParticipantHost,
                     isVideoOn: Boolean(v.isVideoOn),
-                    isAudioOn: Boolean(v.isAudioOn)
+                    isAudioOn: Boolean(v.isAudioOn),
+                    isScreenSharing: Boolean(v.isScreenSharing)
                 });
             });
         }
@@ -1795,7 +1860,7 @@ export default function VideoMeetComponent() {
                                 autoPlay
                                 muted
                                 playsInline
-                                className={`${styles.tileVideo} ${styles.tileVideoMirrored}`}
+                                className={`${styles.tileVideo} ${screen ? styles.tileVideoScreenShare : (video ? styles.tileVideoMirrored : '')}`}
                                 style={{ display: (video || screen) ? 'block' : 'none' }}
                             />
 
@@ -1821,11 +1886,14 @@ export default function VideoMeetComponent() {
 
                             {/* Local Participant Name Overlay */}
                             <div className={styles.tileNameTag}>
+                                {screen && (
+                                    <ScreenShareIcon sx={{ fontSize: 16, color: '#8ab4f8', mr: 0.5 }} />
+                                )}
                                 <span
                                     className={styles.tileNameText}
-                                    title={getDisplayName(username, true)}
+                                    title={screen ? `${getDisplayName(username, true)} (Presentation)` : getDisplayName(username, true)}
                                 >
-                                    {getDisplayName(username, true)}
+                                    {screen ? `${getDisplayName(username, true)} (Presentation)` : getDisplayName(username, true)}
                                 </span>
                             </div>
 
@@ -1845,7 +1913,7 @@ export default function VideoMeetComponent() {
                                 peerStream &&
                                 peerStream.getVideoTracks().some((t) => t.readyState === 'live' && t.enabled)
                             );
-                            const showVideo = Boolean(peer.isVideoOn && hasLiveVideoTrack);
+                            const showVideo = Boolean((peer.isVideoOn || peer.isScreenSharing) && hasLiveVideoTrack);
 
                             const rawRemoteName = resolveParticipantName(peer.socketId, peer.userName);
                             const remoteDisplayName = getDisplayName(rawRemoteName, false);
@@ -1888,8 +1956,8 @@ export default function VideoMeetComponent() {
                                         }}
                                         autoPlay
                                         playsInline
-                                        muted
-                                        className={styles.tileVideo}
+                                        muted={!peer.isScreenSharing}
+                                        className={`${styles.tileVideo} ${peer.isScreenSharing ? styles.tileVideoScreenShare : ''}`}
                                         style={{ display: showVideo ? 'block' : 'none' }}
                                     />
 
@@ -1915,11 +1983,14 @@ export default function VideoMeetComponent() {
 
                                     {/* Remote Participant Name Tag */}
                                     <div className={styles.tileNameTag}>
+                                        {peer.isScreenSharing && (
+                                            <ScreenShareIcon sx={{ fontSize: 16, color: '#8ab4f8', mr: 0.5 }} />
+                                        )}
                                         <span
                                             className={styles.tileNameText}
-                                            title={remoteDisplayName}
+                                            title={peer.isScreenSharing ? `${remoteDisplayName} (Presentation)` : remoteDisplayName}
                                         >
-                                            {remoteDisplayName}
+                                            {peer.isScreenSharing ? `${remoteDisplayName} (Presentation)` : remoteDisplayName}
                                         </span>
                                     </div>
 
@@ -2052,6 +2123,14 @@ export default function VideoMeetComponent() {
                                                     </div>
                                                 </div>
                                                 <div className={styles.participantControls}>
+                                                    {participant.isScreenSharing && (
+                                                        <div
+                                                            className={`${styles.statusIcon} ${styles.statusIconActive}`}
+                                                            title="Presenting screen"
+                                                        >
+                                                            <ScreenShareIcon sx={{ fontSize: 18 }} />
+                                                        </div>
+                                                    )}
                                                     <div
                                                         className={`${styles.statusIcon} ${participant.isAudioOn ? styles.statusIconActive : styles.statusIconMuted}`}
                                                         title={participant.isAudioOn ? 'Microphone on' : 'Microphone muted'}

@@ -223,10 +223,21 @@
     object-fit: cover;
     background-color: #202124;
     display: block;
+    transform: none;
+    -webkit-transform: none;
 }
 
 .tileVideoMirrored {
-    transform: scaleX(-1);
+    transform: scaleX(-1) !important;
+    -webkit-transform: scaleX(-1) !important;
+}
+
+/* Screen sharing video: unmirrored, letterboxed to preserve aspect ratio */
+.tileVideoScreenShare {
+    object-fit: contain !important;
+    transform: none !important;
+    -webkit-transform: none !important;
+    background-color: #000000 !important;
 }
 
 /* Camera OFF Avatar Placeholder Tile */
